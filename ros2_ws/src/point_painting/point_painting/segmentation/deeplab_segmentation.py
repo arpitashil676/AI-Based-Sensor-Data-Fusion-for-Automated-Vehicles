@@ -1,38 +1,25 @@
 import numpy as np
+import cv2
 from PIL import Image
-
-# COCO class IDs relevant for driving scenes
-# YOLO uses the same COCO class IDs as DeepLabV3
-# 0=person, 1=bicycle, 2=car, 3=motorcycle, 5=bus, 7=truck
-# Note: YOLO COCO IDs differ from DeepLab — remapped below to our colour map IDs
-YOLO_TO_PAINTING_CLASS = {
-    0:  15,  # person     → painting class 15 (red)
-    1:  2,   # bicycle    → painting class 2  (blue)
-    2:  3,   # car        → painting class 3  (green)
-    3:  4,   # motorcycle → painting class 4  (orange)
-    5:  6,   # bus        → painting class 6  (yellow)
-    7:  3,   # truck      → painting class 3  (green, same as car)
-}
-
-_model = None
 
 
 def load_model(checkpoint_path: str = None):
     """
-    Load YOLOv11n-seg. Downloads automatically on first use (~6 MB, cached).
-    checkpoint_path is accepted for API compatibility but ignored.
+    Load YOLO segmentation model. Uses yolo11n-seg.pt by default (auto-downloads).
+    Pass checkpoint_path to use a custom model file (e.g. yolo26n-seg.pt).
     """
-    global _model
     from ultralytics import YOLO
-    _model = YOLO('yolo11n-seg.pt')
-    return _model
+    model_path = checkpoint_path if checkpoint_path else 'yolo11n-seg.pt'
+    return YOLO(model_path)
 
 
 def segment_image(model, image: Image.Image) -> np.ndarray:
     """
     Run YOLO instance segmentation on a PIL image.
-    Returns a (H, W) array where each pixel holds the painting class ID
-    (matched to our colour map) or 0 for background.
+    Returns a (H, W) array with native YOLO/COCO class IDs per pixel, 0 = background.
+
+    COCO class IDs (relevant for driving):
+      0=person, 1=bicycle, 2=car, 3=motorcycle, 5=bus, 7=truck
     """
     img_np = np.array(image)
     h, w = img_np.shape[:2]
@@ -44,18 +31,13 @@ def segment_image(model, image: Image.Image) -> np.ndarray:
         if result.masks is None:
             continue
 
-        masks = result.masks.data.cpu().numpy()   # (N, H', W')
-        classes = result.boxes.cls.cpu().numpy().astype(int)  # (N,)
+        masks = result.masks.data.cpu().numpy()        # (N, H', W')
+        classes = result.boxes.cls.cpu().numpy().astype(int)  # (N,) — native COCO IDs
 
-        for mask, yolo_cls in zip(masks, classes):
-            painting_cls = YOLO_TO_PAINTING_CLASS.get(yolo_cls)
-            if painting_cls is None:
-                continue
-
-            import cv2
+        for mask, cls_id in zip(masks, classes):
             mask_u8 = (mask * 255).astype(np.uint8)
             mask_resized = cv2.resize(mask_u8, (w, h), interpolation=cv2.INTER_NEAREST)
-            label_mask[mask_resized > 127] = painting_cls
+            label_mask[mask_resized > 127] = cls_id
 
     return label_mask
 
@@ -68,23 +50,19 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='Run YOLO segmentation on an image')
     parser.add_argument('--image', required=True, help='Path to input image')
-    parser.add_argument('--checkpoint', default=None, help='Ignored — YOLO auto-downloads')
+    parser.add_argument('--checkpoint', default=None, help='Path to YOLO model file')
     args = parser.parse_args()
 
-    model = load_model()
+    model = load_model(args.checkpoint)
     image = Image.open(args.image).convert('RGB')
     label_mask = segment_image(model, image)
 
-    # Simple colour visualisation for verification
-    COLORS = {2: (0, 0, 255), 3: (0, 255, 0), 4: (255, 128, 0),
-              6: (255, 255, 0), 15: (255, 0, 0)}
-    vis = np.array(image).copy()
-    for cls_id, (r, g, b) in COLORS.items():
-        vis[label_mask == cls_id] = (r, g, b)
+    print('Detected classes:', np.unique(label_mask[label_mask > 0]))
+    print('Class names:', {i: model.names[i] for i in np.unique(label_mask) if i in model.names})
 
     plt.figure(figsize=(12, 5))
     plt.subplot(1, 2, 1); plt.imshow(image); plt.title('Original'); plt.axis('off')
-    plt.subplot(1, 2, 2); plt.imshow(vis); plt.title('YOLO Segmentation'); plt.axis('off')
+    plt.subplot(1, 2, 2); plt.imshow(label_mask, cmap='tab20'); plt.title('YOLO Classes'); plt.axis('off')
     out = args.image.rsplit('.', 1)[0] + '_yolo_seg.png'
     plt.savefig(out)
     print(f'Saved: {out}')

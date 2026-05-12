@@ -15,13 +15,13 @@ from point_painting.painting_logic import init_projector, paint_points
 # RGB colors per class ID for the painted point cloud (COCO classes)
 # painted points show their semantic class as a color in Foxglove
 CLASS_COLORS = {
-    0:  (50,  50,  50),   # background — dark grey
-    2:  (0,   0,   255),  # bicycle    — blue
-    3:  (0,   255, 0),    # car        — green
-    4:  (255, 128, 0),    # motorcycle — orange
-    6:  (255, 255, 0),    # bus        — yellow
-    7:  (0,   255, 255),  # train      — cyan
-    15: (255, 0,   0),    # person     — red
+    # Native YOLO/COCO class IDs — no remapping needed
+    0:  (255, 0,   0),    # person     — red
+    1:  (0,   0,   255),  # bicycle    — blue
+    2:  (0,   255, 0),    # car        — green
+    3:  (255, 128, 0),    # motorcycle — orange
+    5:  (255, 255, 0),    # bus        — yellow
+    7:  (0,   200, 0),    # truck      — dark green
 }
 UNPAINTED_COLOR = (30, 30, 30)  # near-black for unpainted points
 
@@ -60,7 +60,8 @@ class PaintingNode(Node):
         try:
             from point_painting.segmentation.deeplab_segmentation import load_model
             self._seg_model = load_model(checkpoint if checkpoint else None)
-            self.get_logger().info('Segmentation model loaded (torchvision DeepLabV3-ResNet101)')
+            model_name = checkpoint if checkpoint else 'yolo11n-seg.pt'
+            self.get_logger().info(f'Segmentation model loaded: {model_name}')
         except Exception as e:
             self.get_logger().error(f'Failed to load segmentation model: {e}')
             self.get_logger().warn('Node will use raw image channel as label map.')

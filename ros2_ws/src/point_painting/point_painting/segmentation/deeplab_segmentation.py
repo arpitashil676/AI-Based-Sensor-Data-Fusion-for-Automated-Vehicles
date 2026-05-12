@@ -5,11 +5,11 @@ from PIL import Image
 
 def load_model(checkpoint_path: str = None):
     """
-    Load YOLO segmentation model. Uses yolo11n-seg.pt by default (auto-downloads).
-    Pass checkpoint_path to use a custom model file (e.g. yolo26n-seg.pt).
+    Load YOLO26n-seg model. Auto-downloads on first use (~6 MB, cached).
+    Pass checkpoint_path to override with a local file.
     """
     from ultralytics import YOLO
-    model_path = checkpoint_path if checkpoint_path else 'yolo11n-seg.pt'
+    model_path = checkpoint_path if checkpoint_path else 'yolo26n-seg.pt'
     return YOLO(model_path)
 
 
@@ -50,7 +50,7 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='Run YOLO segmentation on an image')
     parser.add_argument('--image', required=True, help='Path to input image')
-    parser.add_argument('--checkpoint', default=None, help='Path to YOLO model file')
+    parser.add_argument('--checkpoint', default=None, help='Path to YOLO model file (default: yolo26n-seg.pt)')
     args = parser.parse_args()
 
     model = load_model(args.checkpoint)

@@ -1,3 +1,23 @@
+"""
+PointPainting ROS 2 Node.
+
+Subscribes to a camera image topic and a LiDAR point cloud topic, runs
+YOLO instance segmentation on each camera frame, projects every LiDAR
+point onto the segmentation mask, and attaches the COCO class ID at that
+pixel to the point.
+
+Published topics:
+    /painting/debug               (std_msgs/String)      — painted/skipped counts per frame
+    /painting/painted_cloud       (sensor_msgs/PointCloud2) — full point cloud coloured by class
+    /painting/segmentation_overlay (sensor_msgs/Image)   — YOLO masks blended on camera image
+    /painting/points_overlay      (sensor_msgs/Image)    — projected LiDAR dots on camera image
+
+Parameters:
+    calib_file      (str) — path to KITTI-format calibration file (calib.txt)
+    checkpoint_path (str) — optional path to a custom YOLO model file
+                            defaults to yolo26n-seg.pt (auto-downloaded)
+"""
+
 import sys
 import struct
 import cv2
@@ -12,11 +32,9 @@ from sensor_msgs_py import point_cloud2 as pc2
 
 from point_painting.painting_logic import init_projector, paint_points
 
-# RGB colors per class ID for the painted point cloud (COCO classes)
-# painted points show their semantic class as a color in Foxglove
+# COCO class IDs mapped to RGB display colours for Foxglove.
+# -1 = background / no detection — uses UNPAINTED_COLOR instead.
 CLASS_COLORS = {
-    # Native YOLO/COCO class IDs — no remapping needed
-    # -1 = background/no detection (unpainted)
     0:  (255, 0,   0),    # person     — red
     1:  (0,   0,   255),  # bicycle    — blue
     2:  (0,   255, 0),    # car        — green
@@ -24,15 +42,30 @@ CLASS_COLORS = {
     5:  (255, 255, 0),    # bus        — yellow
     7:  (0,   200, 0),    # truck      — dark green
 }
-UNPAINTED_COLOR = (30, 30, 30)  # near-black for unpainted points
+UNPAINTED_COLOR = (30, 30, 30)
 
 
 def _color_to_float(r, g, b):
+    """Pack an RGB triplet into a single float32 for PointCloud2 RGB field."""
     packed = struct.pack('BBBB', b, g, r, 0)
     return struct.unpack('f', packed)[0]
 
 
 class PaintingNode(Node):
+    """
+    ROS 2 node that implements the PointPainting fusion algorithm.
+
+    On every incoming LiDAR scan or camera frame, pairs the latest message
+    from each topic (latest-message cache instead of time synchronisation —
+    the two sensors were recorded with different clocks in the bag so
+    timestamp-based sync never fires), then:
+
+      1. Runs YOLO26n-seg on the camera frame to get a per-pixel class mask.
+      2. Projects all LiDAR points onto the mask using the KITTI calibration.
+      3. Attaches the class ID at each projected pixel to the original 3D point.
+      4. Publishes the enriched point cloud and two verification image topics.
+    """
+
     def __init__(self):
         super().__init__('painting_node')
         self._bridge = CvBridge()
@@ -67,13 +100,9 @@ class PaintingNode(Node):
             self.get_logger().warn('Node will use raw image channel as label map.')
 
         # --- Publishers / Subscribers ---
-        # The LiDAR and camera were recorded with different clocks so we use a
-        # latest-message cache instead of ApproximateTimeSynchronizer.
         self._debug_pub = self.create_publisher(String, '/painting/debug', 10)
         self._painted_pub = self.create_publisher(PointCloud2, '/painting/painted_cloud', 10)
-        # Segmentation overlay: YOLO masks blended on camera image.
         self._overlay_pub = self.create_publisher(Image, '/painting/segmentation_overlay', 10)
-        # Points overlay: projected LiDAR dots drawn on camera image, coloured by class.
         self._points_overlay_pub = self.create_publisher(Image, '/painting/points_overlay', 10)
         self.create_subscription(Image, '/blackfly_s/cam0/image_rectified', self._img_cb, 10)
         self.create_subscription(PointCloud2, '/velodyne/points_raw', self._cloud_cb, 10)
@@ -81,16 +110,25 @@ class PaintingNode(Node):
         self.get_logger().info('PaintingNode started, waiting for synced messages...')
 
     def _img_cb(self, msg: Image):
+        """Cache the latest camera frame and trigger painting."""
         self._latest_img = msg
         if self._latest_cloud is not None:
             self._callback(self._latest_img, self._latest_cloud)
 
     def _cloud_cb(self, msg: PointCloud2):
+        """Cache the latest LiDAR scan and trigger painting."""
         self._latest_cloud = msg
         if self._latest_img is not None:
             self._callback(self._latest_img, self._latest_cloud)
 
     def _callback(self, img_msg: Image, cloud_msg: PointCloud2):
+        """
+        Core painting callback — called on every new camera or LiDAR message.
+
+        Runs segmentation on the latest camera frame, projects the latest
+        LiDAR scan onto the resulting mask, and publishes the painted cloud
+        and verification overlays.
+        """
         cv_image = self._bridge.imgmsg_to_cv2(img_msg, desired_encoding='passthrough')
 
         if self._seg_model is not None:
@@ -110,7 +148,8 @@ class PaintingNode(Node):
         self._publish_painted_cloud(xyz, class_ids, cloud_msg.header)
 
         self._frame_count += 1
-        # Publish overlays every 5th frame — full-res images at 8Hz flood Foxglove's buffer
+        # Throttle image topics to every 5th frame — full-res images at 8 Hz
+        # saturate Foxglove's 20 MB frame buffer when the tab is inactive.
         if self._frame_count % 5 == 0:
             self._publish_segmentation_overlay(cv_image, seg_image, img_msg.header)
             self._publish_points_overlay(cv_image, xyz, class_ids, img_msg.header)
@@ -122,26 +161,32 @@ class PaintingNode(Node):
         msg.data = f'frame={self._frame_count} painted={painted} skipped={skipped}'
         self._debug_pub.publish(msg)
 
-    def _publish_segmentation_overlay(self, cv_image: np.ndarray, seg_image: np.ndarray, header):
-        """Blend coloured class masks onto the original image and publish for verification."""
-        # Work in BGR (cv_image from cv_bridge is BGR)
-        overlay = cv_image.copy() if cv_image.ndim == 3 else cv2.cvtColor(cv_image, cv2.COLOR_GRAY2BGR)
+    def _publish_segmentation_overlay(self, cv_image: np.ndarray,
+                                      seg_image: np.ndarray, header):
+        """
+        Blend YOLO class masks onto the camera image and publish.
+
+        Useful for verifying that the segmentation model labels the correct
+        objects before trusting the painted point cloud. Published on
+        /painting/segmentation_overlay at 1/5 of the node rate.
+        """
+        overlay = cv_image.copy() if cv_image.ndim == 3 else cv2.cvtColor(
+            cv_image, cv2.COLOR_GRAY2BGR)
         colour_mask = np.zeros_like(overlay)
 
         for class_id, (r, g, b) in CLASS_COLORS.items():
             if class_id == -1:
-                continue  # skip background
+                continue
             mask = seg_image == class_id
             if not mask.any():
                 continue
-            # seg_image is at model output resolution — resize mask to match image
             if seg_image.shape != overlay.shape[:2]:
                 import cv2 as _cv2
                 mask_u8 = mask.astype(np.uint8) * 255
                 mask_u8 = _cv2.resize(mask_u8, (overlay.shape[1], overlay.shape[0]),
                                       interpolation=_cv2.INTER_NEAREST)
                 mask = mask_u8 > 0
-            colour_mask[mask] = (b, g, r)  # BGR order
+            colour_mask[mask] = (b, g, r)  # BGR order for OpenCV
 
         blended = cv2.addWeighted(overlay, 0.6, colour_mask, 0.4, 0)
         overlay_msg = self._bridge.cv2_to_imgmsg(blended, encoding='bgr8')
@@ -150,8 +195,14 @@ class PaintingNode(Node):
 
     def _publish_points_overlay(self, cv_image: np.ndarray, xyz: np.ndarray,
                                 class_ids: list, header):
-        """Draw projected LiDAR points as coloured dots on the camera image and publish."""
-        from perception_framework.lidar_to_image_projection import KittiLidarToImageProjector
+        """
+        Draw projected LiDAR points as coloured dots on the camera image and publish.
+
+        Each dot shows exactly which pixel a LiDAR point projects onto and what
+        class it received. This is the clearest end-to-end verification of the
+        full projection + segmentation pipeline. Published on
+        /painting/points_overlay at 1/5 of the node rate.
+        """
         from point_painting.painting_logic import _projector
 
         if _projector is None:
@@ -160,14 +211,10 @@ class PaintingNode(Node):
         h, w = cv_image.shape[:2]
         canvas = cv_image.copy()
 
-        image_points, _ = _projector.project_lidar_to_image(xyz, (h, w))
-        if len(image_points) == 0:
-            return
-
-        # Rebuild per-point class lookup using same projection as paint_points
         camera_pts = _projector.lidar_to_camera(xyz)
         depth_ok = camera_pts[:, 2] > 0
         cam_depth = camera_pts[depth_ok]
+        depth_indices = np.where(depth_ok)[0]
 
         import cv2 as _cv2
         proj, _ = _cv2.projectPoints(
@@ -177,7 +224,6 @@ class PaintingNode(Node):
             _projector.dist_coeffs,
         )
         proj = proj.reshape(-1, 2)
-        depth_indices = np.where(depth_ok)[0]
         u_all, v_all = proj[:, 0], proj[:, 1]
         inside = (u_all >= 0) & (u_all < w) & (v_all >= 0) & (v_all < h)
 
@@ -194,6 +240,13 @@ class PaintingNode(Node):
         self._points_overlay_pub.publish(msg)
 
     def _publish_painted_cloud(self, xyz: np.ndarray, class_ids: list, header):
+        """
+        Publish the semantically enriched point cloud.
+
+        Each point keeps its original LiDAR x, y, z coordinates. The rgb
+        field encodes the COCO class colour so Foxglove can display it with
+        Color mode: BGR (packed), Color field: rgb.
+        """
         fields = [
             PointField(name='x',   offset=0,  datatype=PointField.FLOAT32, count=1),
             PointField(name='y',   offset=4,  datatype=PointField.FLOAT32, count=1),
@@ -202,16 +255,17 @@ class PaintingNode(Node):
         ]
 
         cloud_data = []
-        for i, (pt, cid) in enumerate(zip(xyz, class_ids)):
+        for pt, cid in zip(xyz, class_ids):
             r, g, b = CLASS_COLORS.get(cid, UNPAINTED_COLOR)
-            rgb_float = _color_to_float(r, g, b)
-            cloud_data.append([float(pt[0]), float(pt[1]), float(pt[2]), rgb_float])
+            cloud_data.append([float(pt[0]), float(pt[1]), float(pt[2]),
+                                _color_to_float(r, g, b)])
 
         cloud_msg = pc2.create_cloud(header, fields, cloud_data)
         self._painted_pub.publish(cloud_msg)
 
 
 def main(args=None):
+    """Entry point — initialise ROS 2 and spin the painting node."""
     rclpy.init(args=args)
     node = PaintingNode()
     try:

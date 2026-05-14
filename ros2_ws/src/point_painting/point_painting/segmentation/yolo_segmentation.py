@@ -1,3 +1,23 @@
+"""
+YOLO instance segmentation wrapper for PointPainting.
+
+Provides two public functions used by the painting node and the isolation test:
+    load_model(checkpoint_path)      — load YOLO26n-seg (auto-downloads if not found)
+    segment_image(model, image)      — run segmentation, return (H, W) class ID array
+
+Design decisions:
+    - Label mask is initialised to -1 (not 0) because COCO class 0 = person.
+      Zero-initialisation would label all background pixels as person.
+    - Confidence threshold is set to 0.15 (below YOLO default of 0.25) to
+      catch small or partially occluded objects like distant pedestrians.
+    - Masks are resized back to the full input image resolution so pixel
+      coordinates from the LiDAR projection map directly onto the mask.
+
+Built on top of the initial YOLO script from carlosaterans-cmd (Code branch)
+but with class labels preserved — their version published a binary mask and
+discarded the class information.
+"""
+
 import numpy as np
 import cv2
 from PIL import Image

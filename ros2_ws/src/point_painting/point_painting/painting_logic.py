@@ -1,3 +1,18 @@
+"""
+PointPainting core logic — projection and class label lookup.
+
+This module is intentionally kept free of ROS dependencies so it can be
+imported and unit-tested on any machine without a ROS runtime.
+
+The two public functions are:
+    init_projector(calib_file_path) — load calibration matrices once at startup
+    paint_points(points_xyz, seg_image) — project LiDAR points and return class IDs
+
+The projection uses KittiLidarToImageProjector from the perception_framework
+package (implemented by arpitashil676). We call its lidar_to_camera() method
+and camera_matrix directly — one projection pass, no duplication.
+"""
+
 import numpy as np
 from perception_framework.lidar_to_image_projection import KittiLidarToImageProjector
 

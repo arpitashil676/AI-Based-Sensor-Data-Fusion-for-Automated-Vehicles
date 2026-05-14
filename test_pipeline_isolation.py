@@ -91,7 +91,7 @@ model = YOLO(YOLO_MODEL)
 img_rgb = cv2.cvtColor(img_frame, cv2.COLOR_BGR2RGB)
 h, w = img_frame.shape[:2]
 
-results = model(img_rgb, verbose=False)
+results = model(img_rgb, verbose=False, conf=0.15)
 label_mask = np.full((h, w), -1, dtype=np.int32)  # -1 = background/no detection
 
 for result in results:

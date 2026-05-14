@@ -20,3 +20,6 @@ __pycache__/
 *.pth
 *.pth.tar
 *.pt
+
+# Test output images
+isolation_output/

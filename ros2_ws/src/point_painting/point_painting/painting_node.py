@@ -54,14 +54,13 @@ class PaintingNode(Node):
             )
 
         # --- Segmentation model ---
-        self.declare_parameter('deeplab_repo_path', '')
         self.declare_parameter('checkpoint_path', '')
         checkpoint = self.get_parameter('checkpoint_path').get_parameter_value().string_value
 
         try:
-            from point_painting.segmentation.deeplab_segmentation import load_model
+            from point_painting.segmentation.yolo_segmentation import load_model
             self._seg_model = load_model(checkpoint if checkpoint else None)
-            model_name = checkpoint if checkpoint else 'yolo11n-seg.pt'
+            model_name = checkpoint if checkpoint else 'yolo26n-seg.pt'
             self.get_logger().info(f'Segmentation model loaded: {model_name}')
         except Exception as e:
             self.get_logger().error(f'Failed to load segmentation model: {e}')
@@ -94,7 +93,7 @@ class PaintingNode(Node):
         cv_image = self._bridge.imgmsg_to_cv2(img_msg, desired_encoding='passthrough')
 
         if self._seg_model is not None:
-            from point_painting.segmentation.deeplab_segmentation import segment_image
+            from point_painting.segmentation.yolo_segmentation import segment_image
             pil_image = PilImage.fromarray(cv_image[..., ::-1])
             seg_image = segment_image(self._seg_model, pil_image)
         else:

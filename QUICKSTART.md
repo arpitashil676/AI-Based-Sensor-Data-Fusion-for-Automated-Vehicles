@@ -35,14 +35,10 @@ Expected output:
 [INFO] PaintingNode started, waiting for synced messages...
 ```
 
-`painted` counts are real — each point genuinely projects onto the image.  
-`class_ids` values are raw pixel intensities (not semantic labels) until the model is loaded.
+### Mode B — Full pipeline with YOLO segmentation
 
-### Mode B — Full pipeline with DeepLab segmentation
-
-No checkpoint file needed. The node uses torchvision's built-in DeepLabV3-ResNet101 pretrained on
-COCO, which includes driving-relevant classes (person=15, bicycle=2, motorcycle=4, bus=6).
-Weights (~330 MB) are downloaded automatically on first run and cached in `/root/.cache/torch`.
+No model file needed. YOLO26n-seg downloads automatically on first run (~6 MB, cached).  
+Uses native COCO class IDs: `0`=person, `1`=bicycle, `2`=car, `3`=motorcycle, `5`=bus, `7`=truck.
 
 ```bash
 source /workspace/ros2_ws/install/setup.bash
@@ -54,14 +50,24 @@ ros2 run point_painting painting_node \
 Expected output:
 ```
 [INFO] Loaded calibration from: /workspace/calib.txt
-[INFO] Segmentation model loaded (torchvision DeepLabV3-ResNet101)
+[INFO] Segmentation model loaded: yolo26n-seg.pt
 [INFO] PaintingNode started, waiting for synced messages...
 ```
 
-`class_ids` are real semantic labels. Driving-relevant ones:
-- `2` = bicycle, `4` = motorcycle, `6` = bus, `15` = person
+To use a custom model file (e.g. a fine-tuned checkpoint):
+```bash
+ros2 run point_painting painting_node \
+  --ros-args \
+  -p calib_file:=/workspace/calib.txt \
+  -p checkpoint_path:=/workspace/yolo26n-seg.pt
+```
 
-Note: DeepLabV3 on CPU adds ~2–5 seconds per frame.
+**Colour map in Foxglove 3D view:**
+- 🔴 Red = person
+- 🟢 Green = car / truck
+- 🔵 Blue = bicycle
+- 🟠 Orange = motorcycle
+- 🟡 Yellow = bus
 
 ---
 
@@ -79,49 +85,59 @@ ros2 bag play /workspace/studentProject1/ --loop
 ros2 topic echo /painting/debug
 ```
 
-You will see a line every ~100ms:
+You will see a line per frame:
 ```
-data: 'frame=1 painted=8243 skipped=4901'
-data: 'frame=2 painted=8019 skipped=5125'
+data: 'frame=1 painted=5050 skipped=59070'
 ```
 
-- **painted** = LiDAR points that projected onto the camera image
-- **skipped** = points behind the camera or outside the frame
-
-Roughly 60–70% painted is expected given the camera's ~45° horizontal field of view.
+- **painted** = LiDAR points that projected onto a detected object
+- **skipped** = points behind the camera, outside the frame, or on background
 
 ---
 
 ## Step 5 — Visualise in Foxglove Studio (Terminal 4)
 
-RViz2 has no display inside the container. Start the Foxglove WebSocket bridge instead:
+Start the Foxglove WebSocket bridge:
 
 ```bash
 ros2 launch foxglove_bridge foxglove_bridge_launch.xml port:=9090
 ```
 
-Expected output:
-```
-[foxglove_bridge]: WebSocket server listening on ws://0.0.0.0:9090
-```
-
 Then on your **Mac**:
 1. Open [Foxglove Studio](https://app.foxglove.dev) (browser or desktop app)
-2. Click **Open connection** → **Foxglove WebSocket**
-3. Enter `ws://localhost:9090` and click **Open**
+2. Click **Open connection** → **Foxglove WebSocket** → `ws://localhost:9090`
 
-Inside Foxglove:
-- Click **+** → **3D** panel → subscribe to `/velodyne/points_raw` to see the point cloud
-- Click **+** → **Image** panel → subscribe to `/blackfly_s/cam0/image_rectified` to see the camera feed
-- Click **+** → **Raw Messages** panel → subscribe to `/painting/debug` to watch painted/skipped counts
+Inside Foxglove add these panels:
+- **3D** → subscribe to `/painting/painted_cloud` (set Color mode → RGB) to see the painted point cloud
+- **Image** → subscribe to `/painting/segmentation_overlay` to verify YOLO masks on the camera image
+- **Image** → subscribe to `/blackfly_s/cam0/image_rectified` for the raw camera feed
+- **Raw Messages** → subscribe to `/painting/debug` to watch painted/skipped counts
 
 Port `9090` is automatically forwarded by the devcontainer — no extra configuration needed.
 
 ---
 
-## Optional — Extract frames from the bag without ROS running
+## Optional — Run the pipeline isolation test (no ROS needed)
 
-Useful for running DeepLab offline on real data:
+Runs the full pipeline on one bag frame and saves 4 verification images to `/workspace/isolation_output/`:
+
+```bash
+python3 /workspace/test_pipeline_isolation.py
+```
+
+Output images:
+```
+isolation_output/01_raw_image.jpg          ← original camera frame
+isolation_output/02_yolo_mask.jpg          ← YOLO class mask (colour per class)
+isolation_output/03_overlay.jpg            ← mask blended on image
+isolation_output/04_lidar_projected.jpg    ← LiDAR points on image, coloured by class
+```
+
+If `04_lidar_projected.jpg` shows green dots on the car and red dots on the person, the full pipeline is correct.
+
+---
+
+## Optional — Extract frames from the bag
 
 ```bash
 cd /workspace
@@ -136,15 +152,6 @@ extract_bag_data(
     'output_data'
 )
 "
-```
-
-Output:
-```
-output_data/frame_0000.jpg  ← camera frames
-...
-output_data/frame_0009.jpg
-output_data/lidar_points.npy   ← (N, 4) float32: x, y, z, intensity
-output_data/lidar_metadata.txt
 ```
 
 ---

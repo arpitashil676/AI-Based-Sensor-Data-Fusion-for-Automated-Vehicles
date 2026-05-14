@@ -107,9 +107,11 @@ class PaintingNode(Node):
         painted, skipped, class_ids = paint_points(xyz, seg_image)
 
         self._publish_painted_cloud(xyz, class_ids, cloud_msg.header)
-        self._publish_segmentation_overlay(cv_image, seg_image, img_msg.header)
 
         self._frame_count += 1
+        # Publish overlay every 5th frame — full-res images at 8Hz flood Foxglove's buffer
+        if self._frame_count % 5 == 0:
+            self._publish_segmentation_overlay(cv_image, seg_image, img_msg.header)
         if self._frame_count % 50 == 0:
             self.get_logger().info(
                 f'Frame {self._frame_count}: painted={painted}, skipped={skipped}')

@@ -127,7 +127,7 @@ class PaintingNode(Node):
         colour_mask = np.zeros_like(overlay)
 
         for class_id, (r, g, b) in CLASS_COLORS.items():
-            if class_id == 0:
+            if class_id == -1:
                 continue  # skip background
             mask = seg_image == class_id
             if not mask.any():

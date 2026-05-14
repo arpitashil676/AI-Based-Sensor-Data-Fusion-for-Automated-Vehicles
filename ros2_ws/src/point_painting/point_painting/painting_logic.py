@@ -15,6 +15,9 @@ def paint_points(points_xyz: np.ndarray, seg_image: np.ndarray):
 
     Returns (painted_count, skipped_count, class_ids).
     class_ids[i] == -1 means point i did not land inside the image.
+
+    Uses KittiLidarToImageProjector (perception_framework) as the single
+    source of projection — one projection pass, no duplicate math.
     """
     n = len(points_xyz)
 
@@ -23,37 +26,35 @@ def paint_points(points_xyz: np.ndarray, seg_image: np.ndarray):
 
     h, w = seg_image.shape[:2]
 
-    # Single projection pass — get pixel coords for all in-frame points
-    image_points, valid_lidar = _projector.project_lidar_to_image(points_xyz, (h, w))
-
-    if len(image_points) == 0:
-        return 0, n, [-1] * n
-
-    # Find which original indices correspond to the in-frame points.
-    # Project all points to camera space, keep depth>0, then apply same
-    # in-bounds mask to recover original indices.
+    # Step 1: transform all points to camera space (colleague's method)
     camera_pts = _projector.lidar_to_camera(points_xyz)
+
+    # Step 2: keep only points in front of the camera
     depth_ok = camera_pts[:, 2] > 0
     depth_indices = np.where(depth_ok)[0]
+    cam_front = camera_pts[depth_ok]
 
-    cam_depth_pts = camera_pts[depth_ok]
+    if len(cam_front) == 0:
+        return 0, n, [-1] * n
+
+    # Step 3: project to pixels using colleague's camera matrix
     import cv2
-    rvec = np.zeros((3, 1), dtype=np.float64)
-    tvec = np.zeros((3, 1), dtype=np.float64)
     proj, _ = cv2.projectPoints(
-        cam_depth_pts.astype(np.float64),
-        rvec, tvec,
+        cam_front.astype(np.float64),
+        np.zeros((3, 1)), np.zeros((3, 1)),
         _projector.camera_matrix.astype(np.float64),
         _projector.dist_coeffs,
     )
     proj = proj.reshape(-1, 2)
     u_all, v_all = proj[:, 0], proj[:, 1]
-    inside = (u_all >= 0) & (u_all < w) & (v_all >= 0) & (v_all < h)
 
+    # Step 4: keep only points inside the image frame
+    inside = (u_all >= 0) & (u_all < w) & (v_all >= 0) & (v_all < h)
     orig_indices = depth_indices[inside]
     u_in = np.clip(u_all[inside].astype(int), 0, w - 1)
     v_in = np.clip(v_all[inside].astype(int), 0, h - 1)
 
+    # Step 5: look up class at each pixel
     class_ids = np.full(n, -1, dtype=int)
     class_ids[orig_indices] = seg_image[v_in, u_in]
     painted = int(inside.sum())

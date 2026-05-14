@@ -71,9 +71,10 @@ class PaintingNode(Node):
         # latest-message cache instead of ApproximateTimeSynchronizer.
         self._debug_pub = self.create_publisher(String, '/painting/debug', 10)
         self._painted_pub = self.create_publisher(PointCloud2, '/painting/painted_cloud', 10)
-        # Segmentation overlay: original image with coloured class masks blended on top.
-        # View this in Foxglove Image panel to verify the model labels the right objects.
+        # Segmentation overlay: YOLO masks blended on camera image.
         self._overlay_pub = self.create_publisher(Image, '/painting/segmentation_overlay', 10)
+        # Points overlay: projected LiDAR dots drawn on camera image, coloured by class.
+        self._points_overlay_pub = self.create_publisher(Image, '/painting/points_overlay', 10)
         self.create_subscription(Image, '/blackfly_s/cam0/image_rectified', self._img_cb, 10)
         self.create_subscription(PointCloud2, '/velodyne/points_raw', self._cloud_cb, 10)
 
@@ -109,9 +110,10 @@ class PaintingNode(Node):
         self._publish_painted_cloud(xyz, class_ids, cloud_msg.header)
 
         self._frame_count += 1
-        # Publish overlay every 5th frame — full-res images at 8Hz flood Foxglove's buffer
+        # Publish overlays every 5th frame — full-res images at 8Hz flood Foxglove's buffer
         if self._frame_count % 5 == 0:
             self._publish_segmentation_overlay(cv_image, seg_image, img_msg.header)
+            self._publish_points_overlay(cv_image, xyz, class_ids, img_msg.header)
         if self._frame_count % 50 == 0:
             self.get_logger().info(
                 f'Frame {self._frame_count}: painted={painted}, skipped={skipped}')
@@ -145,6 +147,51 @@ class PaintingNode(Node):
         overlay_msg = self._bridge.cv2_to_imgmsg(blended, encoding='bgr8')
         overlay_msg.header = header
         self._overlay_pub.publish(overlay_msg)
+
+    def _publish_points_overlay(self, cv_image: np.ndarray, xyz: np.ndarray,
+                                class_ids: list, header):
+        """Draw projected LiDAR points as coloured dots on the camera image and publish."""
+        from perception_framework.lidar_to_image_projection import KittiLidarToImageProjector
+        from point_painting.painting_logic import _projector
+
+        if _projector is None:
+            return
+
+        h, w = cv_image.shape[:2]
+        canvas = cv_image.copy()
+
+        image_points, _ = _projector.project_lidar_to_image(xyz, (h, w))
+        if len(image_points) == 0:
+            return
+
+        # Rebuild per-point class lookup using same projection as paint_points
+        camera_pts = _projector.lidar_to_camera(xyz)
+        depth_ok = camera_pts[:, 2] > 0
+        cam_depth = camera_pts[depth_ok]
+
+        import cv2 as _cv2
+        proj, _ = _cv2.projectPoints(
+            cam_depth.astype(np.float64),
+            np.zeros((3, 1)), np.zeros((3, 1)),
+            _projector.camera_matrix.astype(np.float64),
+            _projector.dist_coeffs,
+        )
+        proj = proj.reshape(-1, 2)
+        depth_indices = np.where(depth_ok)[0]
+        u_all, v_all = proj[:, 0], proj[:, 1]
+        inside = (u_all >= 0) & (u_all < w) & (v_all >= 0) & (v_all < h)
+
+        class_arr = np.array(class_ids)
+        for idx, orig_idx in enumerate(depth_indices[inside]):
+            u = int(np.clip(u_all[inside][idx], 0, w - 1))
+            v = int(np.clip(v_all[inside][idx], 0, h - 1))
+            cls_id = class_arr[orig_idx]
+            r, g, b = CLASS_COLORS.get(cls_id, UNPAINTED_COLOR)
+            _cv2.circle(canvas, (u, v), radius=2, color=(b, g, r), thickness=-1)
+
+        msg = self._bridge.cv2_to_imgmsg(canvas, encoding='bgr8')
+        msg.header = header
+        self._points_overlay_pub.publish(msg)
 
     def _publish_painted_cloud(self, xyz: np.ndarray, class_ids: list, header):
         fields = [

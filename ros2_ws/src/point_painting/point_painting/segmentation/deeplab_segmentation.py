@@ -25,7 +25,7 @@ def segment_image(model, image: Image.Image) -> np.ndarray:
     h, w = img_np.shape[:2]
 
     results = model(img_np, verbose=False)
-    label_mask = np.zeros((h, w), dtype=np.int32)
+    label_mask = np.full((h, w), -1, dtype=np.int32)  # -1 = background/no detection
 
     for result in results:
         if result.masks is None:

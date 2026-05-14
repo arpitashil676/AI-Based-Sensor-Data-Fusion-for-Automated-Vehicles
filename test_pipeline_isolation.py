@@ -92,7 +92,7 @@ img_rgb = cv2.cvtColor(img_frame, cv2.COLOR_BGR2RGB)
 h, w = img_frame.shape[:2]
 
 results = model(img_rgb, verbose=False)
-label_mask = np.zeros((h, w), dtype=np.int32)
+label_mask = np.full((h, w), -1, dtype=np.int32)  # -1 = background/no detection
 
 for result in results:
     if result.masks is None:
@@ -105,7 +105,7 @@ for result in results:
         label_mask[mask_resized > 127] = cls_id
 
 # Visualise mask
-detected = np.unique(label_mask[label_mask > 0])
+detected = np.unique(label_mask[label_mask >= 0])
 print(f'  Detected classes: {[(c, model.names[c]) for c in detected if c in model.names]}')
 
 mask_vis = np.zeros((h, w, 3), dtype=np.uint8)
@@ -159,7 +159,7 @@ for pt_px in image_points:
         cls_id = label_mask[v, u]
         color = CLASS_COLORS_BGR.get(cls_id, UNPAINTED_BGR)
         cv2.circle(lidar_img, (u, v), radius=3, color=color, thickness=-1)
-        if cls_id > 0:
+        if cls_id >= 0:
             painted += 1
             class_counts[cls_id] = class_counts.get(cls_id, 0) + 1
 

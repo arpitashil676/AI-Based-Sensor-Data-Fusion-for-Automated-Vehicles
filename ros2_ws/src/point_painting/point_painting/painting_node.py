@@ -16,6 +16,7 @@ from point_painting.painting_logic import init_projector, paint_points
 # painted points show their semantic class as a color in Foxglove
 CLASS_COLORS = {
     # Native YOLO/COCO class IDs — no remapping needed
+    # -1 = background/no detection (unpainted)
     0:  (255, 0,   0),    # person     — red
     1:  (0,   0,   255),  # bicycle    — blue
     2:  (0,   255, 0),    # car        — green

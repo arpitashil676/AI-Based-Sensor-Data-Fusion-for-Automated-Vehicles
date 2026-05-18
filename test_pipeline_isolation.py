@@ -2,14 +2,16 @@
 Pipeline isolation test — no ROS, no live node needed.
 
 What this does:
-  1. Extracts one paired image + LiDAR frame from the bag
-  2. Runs YOLO segmentation on the image
-  3. Projects LiDAR points onto the image using calib.txt
-  4. Colours each projected point by its class
-  5. Saves 4 images so you can visually verify each stage
+  1. Counts all image frames in the bag, picks one at random
+  2. Extracts the chosen image + the nearest LiDAR frame
+  3. Runs YOLO segmentation on the image
+  4. Projects LiDAR points onto the image using calib.txt
+  5. Colours each projected point by its class
+  6. Saves 4 images so you can visually verify each stage
 
 Run inside the container:
-  python3 /workspace/test_pipeline_isolation.py
+  python3 /workspace/test_pipeline_isolation.py           # random frame
+  python3 /workspace/test_pipeline_isolation.py --seed 7  # reproducible
 
 Output (saved to /workspace/isolation_output/):
   01_raw_image.jpg          — original camera frame
@@ -20,8 +22,17 @@ Output (saved to /workspace/isolation_output/):
 
 import sys
 import os
+import random
+import argparse
 import numpy as np
 import cv2
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--seed', type=int, default=None,
+                    help='Random seed for frame selection (omit for a new random frame each run)')
+args = parser.parse_args()
+
+rng = random.Random(args.seed)
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 BAG_PATH   = '/workspace/studentProject1/'
@@ -43,8 +54,8 @@ UNPAINTED_BGR = (80, 80, 80)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
-# ── Stage 1: Extract one paired frame from the bag ─────────────────────────────
-print('\n[Stage 1] Extracting one frame from bag...')
+# ── Stage 1: Pick a random frame from the bag ──────────────────────────────────
+print('\n[Stage 1] Scanning bag to count frames...')
 
 import rosbag2_py
 from rclpy.serialization import deserialize_message
@@ -52,31 +63,58 @@ from rosidl_runtime_py.utilities import get_message
 from cv_bridge import CvBridge
 from sensor_msgs_py import point_cloud2 as pc2
 
-reader = rosbag2_py.SequentialReader()
-reader.open(
-    rosbag2_py.StorageOptions(uri=BAG_PATH, storage_id='sqlite3'),
-    rosbag2_py.ConverterOptions(input_serialization_format='cdr',
-                                output_serialization_format='cdr')
-)
+IMG_TOPIC   = '/blackfly_s/cam0/image_rectified'
+LIDAR_TOPIC = '/velodyne/points_raw'
+
+
+def _open_reader(bag_path):
+    r = rosbag2_py.SequentialReader()
+    r.open(
+        rosbag2_py.StorageOptions(uri=bag_path, storage_id='sqlite3'),
+        rosbag2_py.ConverterOptions(input_serialization_format='cdr',
+                                    output_serialization_format='cdr'),
+    )
+    return r
+
+
+# First pass — count image frames so we can pick a random index
+reader = _open_reader(BAG_PATH)
 topic_types = {t.name: t.type for t in reader.get_all_topics_and_types()}
+img_count = 0
+while reader.has_next():
+    topic, _, _ = reader.read_next()
+    if topic == IMG_TOPIC:
+        img_count += 1
+
+print(f'  Found {img_count} image frames in bag.')
+target_idx = rng.randint(0, img_count - 1)
+seed_used = args.seed if args.seed is not None else '(random — use --seed to reproduce)'
+print(f'  Picking frame index {target_idx}  [seed: {seed_used}]')
+
+# Second pass — extract the chosen image and the next LiDAR scan after it
+reader = _open_reader(BAG_PATH)
 bridge = CvBridge()
 
-img_frame = None
+img_frame   = None
 lidar_frame = None
+img_seen    = 0
 
-while reader.has_next() and (img_frame is None or lidar_frame is None):
+while reader.has_next():
     topic, data, _ = reader.read_next()
 
-    if topic == '/blackfly_s/cam0/image_rectified' and img_frame is None:
-        msg = deserialize_message(data, get_message(topic_types[topic]))
-        img_frame = bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
-        print(f'  Got image: {img_frame.shape}')
+    if topic == IMG_TOPIC:
+        if img_seen == target_idx:
+            msg = deserialize_message(data, get_message(topic_types[topic]))
+            img_frame = bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            print(f'  Got image #{target_idx}: {img_frame.shape}')
+        img_seen += 1
 
-    elif topic == '/velodyne/points_raw' and lidar_frame is None:
+    elif topic == LIDAR_TOPIC and img_frame is not None and lidar_frame is None:
         msg = deserialize_message(data, get_message(topic_types[topic]))
         pts = list(pc2.read_points(msg, field_names=('x', 'y', 'z'), skip_nans=True))
         lidar_frame = np.array([(p[0], p[1], p[2]) for p in pts], dtype=np.float32)
         print(f'  Got LiDAR: {lidar_frame.shape[0]} points')
+        break  # both frames acquired
 
 cv2.imwrite(f'{OUTPUT_DIR}/01_raw_image.jpg', img_frame)
 print(f'  Saved: 01_raw_image.jpg')
@@ -94,12 +132,15 @@ h, w = img_frame.shape[:2]
 results = model(img_rgb, verbose=False, conf=0.15)
 label_mask = np.full((h, w), -1, dtype=np.int32)  # -1 = background/no detection
 
+PRIORITY = {0: 10, 1: 9, 3: 8}  # person > bicycle > motorcycle > everything else
+
 for result in results:
     if result.masks is None:
         continue
     masks   = result.masks.data.cpu().numpy()
     classes = result.boxes.cls.cpu().numpy().astype(int)
-    for mask, cls_id in zip(masks, classes):
+    pairs = sorted(zip(masks, classes), key=lambda mc: PRIORITY.get(mc[1], 0))
+    for mask, cls_id in pairs:
         mask_u8 = (mask * 255).astype(np.uint8)
         mask_resized = cv2.resize(mask_u8, (w, h), interpolation=cv2.INTER_NEAREST)
         label_mask[mask_resized > 127] = cls_id
@@ -127,7 +168,7 @@ for cls_id, color in CLASS_COLORS_BGR.items():
     if cls_id in detected:
         name = model.names.get(cls_id, str(cls_id))
         cv2.rectangle(overlay, (10, y-15), (30, y+5), color, -1)
-        cv2.putText(overlay, name, (35, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
+        cv2.putText(overlay, name, (35, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         y += 30
 
 cv2.imwrite(f'{OUTPUT_DIR}/03_overlay.jpg', overlay)
@@ -172,5 +213,4 @@ cv2.imwrite(f'{OUTPUT_DIR}/04_lidar_projected.jpg', lidar_img)
 print(f'  Saved: 04_lidar_projected.jpg')
 
 print(f'\nDone. Open /workspace/isolation_output/ to see all 4 images.')
-print('If 04_lidar_projected.jpg shows coloured dots on the car and person,')
-print('the full pipeline is correct.')
+print('To reproduce this exact frame: python3 test_pipeline_isolation.py --seed', target_idx)

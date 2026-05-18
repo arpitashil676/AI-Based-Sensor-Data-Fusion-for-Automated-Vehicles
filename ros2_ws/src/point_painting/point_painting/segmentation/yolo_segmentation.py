@@ -47,6 +47,10 @@ def segment_image(model, image: Image.Image) -> np.ndarray:
     results = model(img_np, verbose=False, conf=0.15)
     label_mask = np.full((h, w), -1, dtype=np.int32)  # -1 = background/no detection
 
+    # Priority order: vehicles first, vulnerable road users last so they
+    # overwrite vehicle masks when a person stands in front of a car.
+    PRIORITY = {0: 10, 1: 9, 3: 8}  # person > bicycle > motorcycle > everything else
+
     for result in results:
         if result.masks is None:
             continue
@@ -54,7 +58,8 @@ def segment_image(model, image: Image.Image) -> np.ndarray:
         masks = result.masks.data.cpu().numpy()        # (N, H', W')
         classes = result.boxes.cls.cpu().numpy().astype(int)  # (N,) — native COCO IDs
 
-        for mask, cls_id in zip(masks, classes):
+        pairs = sorted(zip(masks, classes), key=lambda mc: PRIORITY.get(mc[1], 0))
+        for mask, cls_id in pairs:
             mask_u8 = (mask * 255).astype(np.uint8)
             mask_resized = cv2.resize(mask_u8, (w, h), interpolation=cv2.INTER_NEAREST)
             label_mask[mask_resized > 127] = cls_id

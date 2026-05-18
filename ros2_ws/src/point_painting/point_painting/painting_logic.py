@@ -45,6 +45,7 @@ def paint_points(points_xyz: np.ndarray, seg_image: np.ndarray):
     camera_pts = _projector.lidar_to_camera(points_xyz)
 
     # Step 2: keep only points in front of the camera
+    # (points behind the camera would project to negative depth and cause issues)
     depth_ok = camera_pts[:, 2] > 0
     depth_indices = np.where(depth_ok)[0]
     cam_front = camera_pts[depth_ok]
